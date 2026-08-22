@@ -10,6 +10,7 @@ import { useMiniDexSocket } from "./lib/ws";
 import { BINANCE_SYMBOL, useBinanceKlines, useBinanceTicker } from "./lib/useBinance";
 import type { Interval } from "./lib/binance";
 import { chainName } from "./lib/chains";
+import { NoticeBar } from "./components/NoticeBar";
 import { Header } from "./components/Header";
 import { TickerBar } from "./components/TickerBar";
 import { Chart } from "./components/Chart";
@@ -60,6 +61,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <NoticeBar />
       <Header config={config.data} auth={auth} />
 
       {config.isError && (

@@ -39,3 +39,15 @@ export function explorerTxUrl(chainId: number, hash: string): string | null {
   if (chainId === avalancheFuji.id) return `https://testnet.snowtrace.io/tx/${hash}`;
   return null;
 }
+
+// 地址浏览器链接：Fuji 用 snowtrace 测试网，anvil 没有浏览器
+export function explorerAddressUrl(chainId: number, address: string): string | null {
+  if (chainId === avalancheFuji.id) return `https://testnet.snowtrace.io/address/${address}`;
+  return null;
+}
+
+// 测试网水龙头（领付 gas 用的 AVAX）：只有 Fuji 有；anvil 账户自带 10000 ETH
+export function faucetUrl(chainId: number): string | null {
+  if (chainId === avalancheFuji.id) return "https://core.app/tools/testnet-faucet/";
+  return null;
+}

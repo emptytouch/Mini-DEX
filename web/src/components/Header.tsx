@@ -1,8 +1,9 @@
 // 顶栏：连接钱包 / 切链 / 签名登录 / 登出，右侧状态小圆点按颜色区分四种状态。
 import { useAccount, useConnect, useDisconnect, useSwitchChain } from "wagmi";
 import type { Config } from "../lib/api";
-import { chainName, chains } from "../lib/chains";
+import { chainName, chains, explorerAddressUrl, faucetUrl } from "../lib/chains";
 import { shortAddress } from "../lib/format";
+import { hasVault } from "../lib/useConfig";
 import type { useAuth } from "../lib/useAuth";
 
 type Auth = ReturnType<typeof useAuth>;
@@ -39,10 +40,10 @@ export function Header({ config, auth }: { config: Config | undefined; auth: Aut
         <span className="logo">◆</span> MiniDex
         <nav className="nav">
           <span className="nav-item on">现货</span>
-          <span className="nav-item">合约</span>
-          <span className="nav-item">理财</span>
         </nav>
       </div>
+
+      {config && <ContractLinks config={config} />}
 
       <div className="header-right">
         {expectedChainId && <span className="pill net">{chainName(expectedChainId)}</span>}
@@ -101,5 +102,45 @@ export function Header({ config, auth }: { config: Config | undefined; auth: Aut
 
       {auth.error && <div className="msg err header-msg">登录失败：{auth.error}</div>}
     </header>
+  );
+}
+
+// 顶栏中间：三个合约地址（来自后端 /config，不在前端写死）+ 测试网水龙头。有浏览器的链可点开看源码。
+function ContractLinks({ config }: { config: Config }) {
+  if (!hasVault(config)) return <span className="muted small">离线模式 · 未连接合约</span>;
+  const items: { label: string; address: string }[] = [
+    { label: "Vault", address: config.vault },
+    { label: "USDC", address: config.tokens.USDC },
+    { label: "WAVAX", address: config.tokens.WAVAX },
+  ];
+  const faucet = faucetUrl(config.chainId);
+  return (
+    <div className="contracts">
+      <span className="muted small">合约</span>
+      {items.map(({ label, address }) => {
+        const url = explorerAddressUrl(config.chainId, address);
+        const body = (
+          <>
+            <span className="tag">{label}</span>
+            <span className="addr">{shortAddress(address)}</span>
+            {url && <span className="ext">↗</span>}
+          </>
+        );
+        return url ? (
+          <a key={label} className="pill link" href={url} target="_blank" rel="noreferrer" title={`${address}（在浏览器中查看合约与源码）`}>
+            {body}
+          </a>
+        ) : (
+          <span key={label} className="pill" title={address}>
+            {body}
+          </span>
+        );
+      })}
+      {faucet && (
+        <a className="pill link faucet" href={faucet} target="_blank" rel="noreferrer" title="领取测试网 AVAX（付 gas 用）">
+          🚰 测试网水龙头 <span className="ext">↗</span>
+        </a>
+      )}
+    </div>
   );
 }

@@ -7,6 +7,7 @@ import { api, type Address, type Balances, type Config, type TokenSymbol } from 
 import { erc20Abi, vaultAbi } from "../lib/abi";
 import { TOKEN_DECIMALS, errorMessage, fmtNum, fmtWei, toWei } from "../lib/format";
 import { hasVault } from "../lib/useConfig";
+import { faucetUrl } from "../lib/chains";
 import { TxStatus } from "./TxStatus";
 
 const TOKENS: TokenSymbol[] = ["USDC", "WAVAX"];
@@ -121,6 +122,16 @@ function Faucet({ config, address }: { config: Config; address: Address }) {
           </button>
         ))}
       </div>
+      <p className="muted small">
+        这里 mint 的是交易用的测试代币。付 gas 的原生币另领：
+        {faucetUrl(config.chainId) ? (
+          <a href={faucetUrl(config.chainId)!} target="_blank" rel="noreferrer">
+            Avalanche 测试网水龙头 ↗
+          </a>
+        ) : (
+          "anvil 账户自带 10000 ETH"
+        )}
+      </p>
       <TxStatus chainId={config.chainId} hash={hash} waiting={receipt.isLoading} success={receipt.isSuccess} failed={receipt.isError} />
       {error && <div className="msg err">{errorMessage(error)}</div>}
     </div>
