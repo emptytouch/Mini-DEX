@@ -806,7 +806,7 @@ h3 {
 
 .wallet-grid {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 1.2fr 1.2fr;
+  grid-template-columns: 1fr 1.4fr 1.2fr 1.2fr; /* 水龙头 · 余额 · 充值 · 提现 */
   gap: 12px;
 }
 .wallet-grid .card {

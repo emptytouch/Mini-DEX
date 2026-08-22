@@ -25,11 +25,12 @@ export function Wallet({ config, token, balances }: WalletProps) {
 
   return (
     <div className="wallet-grid">
-      <BalancesCard config={config} address={address} balances={balances} />
+      {/* 水龙头放最左：新用户第一步就是领测试币 */}
       {address && onchain && <Faucet config={config} address={address} />}
+      {address && !onchain && <OfflineFaucet jwt={token} />}
+      <BalancesCard config={config} address={address} balances={balances} />
       {address && onchain && <DepositForm config={config} address={address} balances={balances} />}
       {address && onchain && token && <WithdrawForm config={config} address={address} jwt={token} />}
-      {address && !onchain && <OfflineFaucet jwt={token} />}
       {!address && <p className="muted">连接钱包后显示余额与充提。</p>}
     </div>
   );
