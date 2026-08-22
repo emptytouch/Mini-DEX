@@ -140,7 +140,7 @@ export function Chart({ symbol, candles, status, interval, onIntervalChange }: P
       <div className="panel-bar">
         <div className="chart-symbol">
           <b>{symbol}</b>
-          <span className="muted">Binance · 现货</span>
+          <span className="muted">Binance · 永续合约</span>
         </div>
         <div className="seg inline">
           {INTERVALS.map((i) => (

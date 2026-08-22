@@ -25,7 +25,7 @@ export function TickerBar({ pair, chainLabel, symbol, lastPrice, ticker, status,
       <div className="ticker-pair">
         <div className="ticker-name">
           <b>{pair}</b>
-          <span className="muted">{chainLabel} · 现货</span>
+          <span className="muted">{chainLabel} · 永续合约</span>
         </div>
       </div>
 
