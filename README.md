@@ -53,7 +53,7 @@
 |:---:|---|---|
 | ① | 顶栏 | 连接 MetaMask → 切换到目标链 → 签名登录；中间是 Vault / USDC / WAVAX 三个合约地址（来自后端 `/config`，Fuji 上可点开 snowtrace 查看已验证源码）和测试网水龙头链接；右侧圆点表示登录状态。顶栏上方还有一条常驻的黄色声明条：本站为测试网教学项目，并非真实交易所 |
 | ② | 行情条 | 最新价、24h 涨跌 / 最高 / 最低 / 成交量（**价格源：Binance `AVAXUSDT`**），以及本所最新成交价 |
-| ③ | 订单簿 | 本所撮合引擎的买卖 12 档，深度条按累计数量绘制；点任意一档把价格填进下单表单 |
+| ③ | 订单簿 | 本所撮合引擎的买卖 12 档，深度条按累计数量绘制；点任意一档把价格填进下单表单。开启做市后右上角显示"流动性镜像 Binance AVAXUSDT"，簿上的单来自做市账户，可直接成交 |
 | ④ | K 线 | TradingView 开源库 `lightweight-charts`，支持 1m ~ 1d 切换，右上角显示行情源状态（实时 / 轮询） |
 | ⑤ | 最近成交 | 本所成交记录，绿色为买方主动成交、红色为卖方主动成交 |
 | ⑥ | 下单 | 买 / 卖、限价 / 市价、可用余额、25% ~ 100% 快捷填数量、"参考价"一键填入 Binance 最新价 |
@@ -68,8 +68,9 @@
 - **真实交易所的撮合规则**：价格 - 时间优先，成交价取挂单方（maker）价格；下单先冻结、成交再划转、撤单解冻，账本永远守恒。
 - **链上托管 + 链下签名提现**：后端用 EIP-712 签发提现授权，用户自己上链领币，带 nonce 防重放和 deadline 过期。
 - **重启可恢复充提**：启动时从部署区块回放 `Deposit` / `Withdraw` 事件重建余额（Primit `block_sync_state` 游标的极简版）。
+- **订单簿有真实流动性（可选）**：内置做市模块把 Binance `AVAXUSDT` 的盘口镜像到本所订单簿（每 2 秒增量刷新），用户下市价单能真的成交；一个环境变量开关。
 - **行情源容错**：Binance WS 主机按顺序故障切换，全部不可用时自动退化为 REST 轮询，界面上有状态提示。
-- **测试齐全**：合约 13 个、后端 19 个、前端 10 个用例，外加一条一键端到端联调脚本。
+- **测试齐全**：合约 13 个、后端 28 个、前端 10 个用例，外加一条一键端到端联调脚本。
 
 ## 🏗 架构
 
@@ -88,6 +89,7 @@ flowchart LR
         Auth["EIP-712 登录 → JWT"]
         Watcher["链上事件监听"]
         Signer["提现签名 signer"]
+        MM["做市模块 （可选）"]
     end
     subgraph Chain["区块链 · contracts/ （anvil 或 Fuji）"]
         Vault["Vault 托管合约"]
@@ -108,6 +110,8 @@ flowchart LR
     API --> Engine
     Engine --> Ledger
     API --> Signer
+    Binance -- "盘口深度" --> MM
+    MM -- "挂 / 撤限价单" --> Engine
 ```
 
 ### 资金流转（重点看这张）
@@ -222,6 +226,8 @@ cd web && npm run dev
 ```
 
 打开 <http://localhost:5173>：Connect MetaMask → Sign in → 底部"资产与充提" Tab 里点 **领取测试余额** → 回到右侧下单。
+
+想让订单簿一开始就有单可吃，在 `server/.env` 里加一行 `MARKET_MAKER=1` 再启动：后端会用一个做市账户把 Binance `AVAXUSDT` 的前 10 档盘口镜像到本所（数量按 5% 缩放），你下市价单就能立刻成交。
 
 > MetaMask 此时连任何网络都可以（离线模式不发链上交易），但登录签名会带上 chainId 31337，建议先按模式 B 的说明添加 Anvil 网络。
 
@@ -377,6 +383,10 @@ EIP-712 登录域：`{ name: "MiniDex", version: "1", chainId }`，类型 `Login
 | `VAULT_ADDRESS` / `USDC_ADDRESS` / `WAVAX_ADDRESS` | 空 | 留空 = 离线模式；填上 = 链上模式 |
 | `DEPOSIT_FROM_BLOCK` | 空 | 启动时从该区块回放 Deposit / Withdraw 重建余额；留空只监听新事件 |
 | `BACKEND_SIGNER_PRIVATE_KEY` | anvil #1 | 签提现授权的私钥，**必须与 `Vault.signer` 一致**；Fuji 请换新钥匙 |
+| `MARKET_MAKER` | 空 | `1` = 开启做市，把 Binance 盘口镜像到本所订单簿 |
+| `MM_SYMBOL` / `MM_LEVELS` / `MM_SCALE` / `MM_INTERVAL_MS` | `AVAXUSDT` / `10` / `0.05` / `2000` | 镜像哪个交易对、每边几档、数量缩放、刷新间隔 |
+| `MM_ADDRESS` | anvil #9 | 做市账户地址（账本里的普通地址） |
+| `MM_SEED_USDC` / `MM_SEED_WAVAX` | `100000` / `10000` | 启动时给做市账户的虚拟余额；设 `0` 则只用它真实 deposit 的钱 |
 
 `web/.env`：
 
@@ -390,7 +400,7 @@ EIP-712 登录域：`{ name: "MiniDex", version: "1", chainId }`，类型 `Login
 
 ```bash
 cd contracts && forge test            # 13 个用例：deposit / withdraw / 签名校验 / nonce 重放 / deadline
-cd server && npm test                 # 19 个用例：撮合引擎 / 定点数 / 账本守恒
+cd server && npm test                 # 28 个用例：撮合引擎 / 定点数 / 账本守恒 / 做市增量计划
 cd web && npm test                    # 10 个用例：Binance K 线解析、合并、主机故障切换
 cd web && npm run typecheck && npm run build
 ./scripts/e2e-anvil.sh                # 端到端：最后一行 E2E OK
@@ -410,12 +420,15 @@ cd web && npm run typecheck && npm run build
 | K 线显示"行情源不可用" | REST 和 WS 都连不上 Binance | 检查网络 / 代理；交易功能不受影响 |
 | Fuji 上 viem 估 gas 报 `exceeds block gas limit` | 公共 RPC 的 gas 估算不准 | 脚本里已显式传 `gas`；浏览器走 MetaMask 自己估算，不受影响 |
 | server 重启后挂单和成交不见了 | 后端是内存态 | 设计如此：只有充提余额会通过事件回放恢复（见下方"已知简化"） |
+| 订单簿是空的，市价单提示"簿上没有流动性" | 没人挂单 | `server/.env` 加 `MARKET_MAKER=1` 开启做市，或用第二个账户手动挂对手单 |
+| 日志出现 `[mm] 拉取 Binance 深度失败` | 当前网络连不上 Binance REST | 做市会自动重试，恢复后继续；不影响已有挂单和其他功能 |
 
 ## 🔒 安全须知
 
 - 仓库里出现的所有私钥（`0xac09…ff80`、`0x59c6…690d` 等）都是 **anvil 公开测试私钥**，全世界都知道，只能用于本地链。**绝对不要往这些地址转真钱。**
 - `server/.env`、`contracts/.env` 已被 `.gitignore` 忽略，只提交 `.env.example`。Fuji 模式的 signer 私钥、部署私钥请自行保管。
 - `BACKEND_SIGNER_PRIVATE_KEY` 就是金库钥匙：提现不受链上 `balances` 硬限制，生产环境必须用 HSM / 多签 + 限额。
+- 做市账户的 `MM_SEED_*` 是**虚拟注资**（没有链上抵押）。链上模式下用户和做市账户成交后提现，实际从 Vault 的存量里转币——测试网教学可以接受，真实环境必须让做市账户真实 deposit（把 `MM_SEED_*` 设为 0）。
 
 ### 已知简化（课上会口头说明）
 

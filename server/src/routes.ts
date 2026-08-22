@@ -3,7 +3,7 @@
 // buy limit 冻结 price*qty USDC；buy market 冻结全部可用 USDC；sell 冻结 qty WAVAX。
 import { Hono } from "hono";
 import { randomBytes, randomUUID } from "node:crypto";
-import { OrderBook, type Fill, type Order, type Side } from "./engine/orderbook.js";
+import { OrderBook, type Fill, type Order, type OrderType, type Side } from "./engine/orderbook.js";
 import { Ledger, type Asset, type Balances } from "./ledger.js";
 import { parseFixed, formatFixed, mulFixed } from "./fixed.js";
 import type { AuthEnv } from "./auth.js";
@@ -19,7 +19,7 @@ export interface RoutesDeps {
   chain: Chain;
   ws: WsHub;
   bearer: MiddlewareHandler<AuthEnv>;
-  config: { chainId: number; wsUrl: string; vault: string; usdc: string; wavax: string };
+  config: { chainId: number; wsUrl: string; vault: string; usdc: string; wavax: string; marketMaker?: { address: string; symbol: string; source: string } | null };
 }
 
 const MAX_TRADES = 200;
@@ -87,6 +87,76 @@ export function createRoutes(d: RoutesDeps) {
     return cost;
   }
 
+  // ---------- 下单 / 撤单核心（HTTP 接口和做市模块共用） ----------
+  const broadcastBook = () => ws.broadcast("orderbook", snapshot(10));
+
+  /** 下单：冻结 -> 撮合 -> 结算 -> 解冻 -> 广播。余额不足等直接抛 Error。 */
+  function placeOrder(
+    owner: string,
+    input: { side: Side; type: OrderType; price: bigint; qty: bigint },
+    opts: { broadcastBook?: boolean } = {},
+  ): { order: Order; fills: Fill[] } {
+    const { side, type, price, qty } = input;
+    const id = randomUUID();
+    // 1. 冻结
+    if (side === "sell") {
+      ledger.lock(owner, "WAVAX", qty);
+      locks.set(id, qty);
+    } else if (type === "limit") {
+      const cost = mulFixed(price, qty);
+      ledger.lock(owner, "USDC", cost);
+      locks.set(id, cost);
+    } else {
+      const available = ledger.get(owner).USDC.available;
+      if (estimateBuyCost(qty) > available) throw new Error("余额不足: USDC 不够买这么多");
+      ledger.lock(owner, "USDC", available); // market buy：先把全部可用 USDC 冻住，撮合完再退
+      locks.set(id, available);
+    }
+
+    // 2. 撮合
+    const { fills, resting } = book.submit({ id, owner, side, type, price, qty });
+
+    // 3. 结算每笔成交
+    for (const f of fills) settle(f);
+
+    // 4. 对手方（maker）如果已经全部成交，把它可能剩的零头解冻
+    const touched = new Set(fills.map((f) => f.makerOrderId));
+    for (const f of fills) {
+      if (touched.has(f.makerOrderId) && !book.get(f.makerOrderId)) {
+        releaseLock(f.makerOrderId, f.maker, side === "buy" ? "sell" : "buy");
+        touched.delete(f.makerOrderId);
+      }
+    }
+
+    // 5. taker 自己：没挂单 -> 全部解冻；挂单了 -> 只留剩余部分需要的
+    if (!resting) {
+      releaseLock(id, owner, side);
+    } else {
+      const need = side === "buy" ? mulFixed(price, resting.remaining) : resting.remaining;
+      const refund = locks.get(id)! - need; // limit buy 按比挂单价更低的 maker 价成交时的差价
+      if (refund > 0n) ledger.unlock(owner, lockAsset(side), refund);
+      locks.set(id, need);
+    }
+
+    // 6. 广播（做市模块一轮会挂很多单，它自己在最后广播一次）
+    if (opts.broadcastBook !== false) broadcastBook();
+    pushBalance(owner);
+    for (const maker of new Set(fills.map((f) => f.maker))) if (maker !== owner) pushBalance(maker);
+
+    const order: Order = resting ?? { id, owner, side, type, price, qty, remaining: qty - fills.reduce((s, f) => s + f.qty, 0n), ts: fills[0]?.ts ?? Date.now(), seq: 0 };
+    return { order, fills };
+  }
+
+  /** 撤单：只能撤自己的；返回被撤的订单，找不到返回 null */
+  function cancelOrder(owner: string, id: string, opts: { broadcastBook?: boolean } = {}): Order | null {
+    const order = book.cancel(id, owner);
+    if (!order) return null;
+    releaseLock(order.id, owner, order.side);
+    if (opts.broadcastBook !== false) broadcastBook();
+    pushBalance(owner);
+    return order;
+  }
+
   // ---------- 公开接口 ----------
   app.get("/config", (c) =>
     c.json({
@@ -95,6 +165,7 @@ export function createRoutes(d: RoutesDeps) {
       tokens: { USDC: d.config.usdc, WAVAX: d.config.wavax },
       wsUrl: d.config.wsUrl,
       mode: chain.offline ? "offline" : "chain",
+      marketMaker: d.config.marketMaker ?? null,
     }),
   );
   app.get("/orderbook", (c) => c.json(snapshot(Number(c.req.query("depth") ?? 10) || 10)));
@@ -123,65 +194,16 @@ export function createRoutes(d: RoutesDeps) {
     if (qty <= 0n) return c.json({ error: "qty 必须 > 0" }, 400);
     if (type === "limit" && price <= 0n) return c.json({ error: "limit 单必须给 price" }, 400);
 
-    const id = randomUUID();
-    // 1. 冻结
     try {
-      if (side === "sell") {
-        ledger.lock(owner, "WAVAX", qty);
-        locks.set(id, qty);
-      } else if (type === "limit") {
-        const cost = mulFixed(price, qty);
-        ledger.lock(owner, "USDC", cost);
-        locks.set(id, cost);
-      } else {
-        const available = ledger.get(owner).USDC.available;
-        if (estimateBuyCost(qty) > available) throw new Error("余额不足: USDC 不够买这么多");
-        ledger.lock(owner, "USDC", available); // market buy：先把全部可用 USDC 冻住，撮合完再退
-        locks.set(id, available);
-      }
+      const { order, fills } = placeOrder(owner, { side, type, price, qty });
+      return c.json({ order: fmtOrder(order), fills: fills.map(fmtFill) });
     } catch (e) { return c.json({ error: (e as Error).message }, 400); }
-
-    // 2. 撮合
-    const { fills, resting } = book.submit({ id, owner, side, type, price, qty });
-
-    // 3. 结算每笔成交
-    for (const f of fills) settle(f);
-
-    // 4. 对手方（maker）如果已经全部成交，把它可能剩的零头解冻
-    const touched = new Set(fills.map((f) => f.makerOrderId));
-    for (const f of fills) {
-      if (touched.has(f.makerOrderId) && !book.get(f.makerOrderId)) {
-        releaseLock(f.makerOrderId, f.maker, side === "buy" ? "sell" : "buy");
-        touched.delete(f.makerOrderId);
-      }
-    }
-
-    // 5. taker 自己：没挂单 -> 全部解冻；挂单了 -> 只留剩余部分需要的
-    if (!resting) {
-      releaseLock(id, owner, side);
-    } else {
-      const need = side === "buy" ? mulFixed(price, resting.remaining) : resting.remaining;
-      const refund = locks.get(id)! - need; // limit buy 按比挂单价更低的 maker 价成交时的差价
-      if (refund > 0n) ledger.unlock(owner, lockAsset(side), refund);
-      locks.set(id, need);
-    }
-
-    // 6. 广播
-    ws.broadcast("orderbook", snapshot(10));
-    pushBalance(owner);
-    for (const maker of new Set(fills.map((f) => f.maker))) if (maker !== owner) pushBalance(maker);
-
-    const order = resting ?? { id, owner, side, type, price, qty, remaining: qty - fills.reduce((s, f) => s + f.qty, 0n), ts: fills[0]?.ts ?? Date.now(), seq: 0 };
-    return c.json({ order: fmtOrder(order), fills: fills.map(fmtFill) });
   });
 
   app.delete("/orders/:id", d.bearer, (c) => {
     const owner = c.get("address");
-    const order = book.cancel(c.req.param("id"), owner);
+    const order = cancelOrder(owner, c.req.param("id"));
     if (!order) return c.json({ error: "订单不存在或不是你的" }, 404);
-    releaseLock(order.id, owner, order.side);
-    ws.broadcast("orderbook", snapshot(10));
-    pushBalance(owner);
     return c.json({ order: fmtOrder(order) });
   });
 
@@ -228,5 +250,5 @@ export function createRoutes(d: RoutesDeps) {
     catch (e) { console.warn(`[ledger] 回放 Withdraw 扣账失败 ${user} ${asset} ${amount}: ${(e as Error).message}`); }
   }
 
-  return { app, onDeposit, onWithdrawBackfill, snapshot };
+  return { app, onDeposit, onWithdrawBackfill, snapshot, placeOrder, cancelOrder, broadcastBook, ordersOf: (owner: string) => book.ordersOf(owner) };
 }

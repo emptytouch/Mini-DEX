@@ -12,6 +12,9 @@ export interface Config {
   vault: Address | "";
   tokens: { USDC: Address; WAVAX: Address };
   wsUrl: string;
+  mode?: "offline" | "chain";
+  // 后端开启做市时返回：订单簿流动性镜像自哪个外部市场
+  marketMaker?: { address: string; symbol: string; source: string } | null;
 }
 
 export interface TokenBalance {

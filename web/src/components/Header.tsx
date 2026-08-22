@@ -38,9 +38,6 @@ export function Header({ config, auth }: { config: Config | undefined; auth: Aut
     <header className="header">
       <div className="brand">
         <span className="logo">◆</span> MiniDex
-        <nav className="nav">
-          <span className="nav-item on">现货</span>
-        </nav>
       </div>
 
       {config && <ContractLinks config={config} />}

@@ -87,6 +87,7 @@ export default function App() {
           lastTrade={trades[0] ?? null}
           prevTrade={trades[1] ?? null}
           refPrice={refPrice}
+          liquidity={config.data?.marketMaker ? `流动性镜像 Binance ${config.data.marketMaker.symbol}` : null}
           onPickPrice={setPickedPrice}
         />
 

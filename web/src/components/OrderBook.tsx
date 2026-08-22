@@ -10,6 +10,7 @@ interface Props {
   lastTrade: Trade | null;
   prevTrade: Trade | null;
   refPrice: number | null; // Binance 最新价，作为参考
+  liquidity?: string | null; // 流动性来源说明（后端开启做市时显示）
   onPickPrice: (price: string) => void;
 }
 
@@ -19,7 +20,7 @@ interface Row {
   cum: number; // 从中间往外累计的数量
 }
 
-export function OrderBook({ book, lastTrade, prevTrade, refPrice, onPickPrice }: Props) {
+export function OrderBook({ book, lastTrade, prevTrade, refPrice, liquidity, onPickPrice }: Props) {
   const asks = accumulate((book?.asks ?? []).slice(0, DEPTH));
   const bids = accumulate((book?.bids ?? []).slice(0, DEPTH));
   const maxCum = Math.max(1e-9, asks[asks.length - 1]?.cum ?? 0, bids[bids.length - 1]?.cum ?? 0);
@@ -36,9 +37,11 @@ export function OrderBook({ book, lastTrade, prevTrade, refPrice, onPickPrice }:
     <div className="panel ob-panel">
       <div className="panel-bar">
         <span className="panel-title">订单簿</span>
-        <span className="muted small">
-          {spread !== null ? `价差 ${fmtNum(spread, 4)} (${fmtNum((spread / bestAsk!) * 100, 2)}%)` : ""}
-        </span>
+        {liquidity && (
+          <span className="chip" title="做市账户持续把外部市场的盘口镜像到本所订单簿">
+            <i className="dot" /> {liquidity}
+          </span>
+        )}
       </div>
       <div className="ob-head">
         <span>价格 (USDC)</span>
@@ -60,7 +63,10 @@ export function OrderBook({ book, lastTrade, prevTrade, refPrice, onPickPrice }:
           {lastDir === "up" && " ▲"}
           {lastDir === "down" && " ▼"}
         </span>
-        <span className="muted small">{refPrice !== null ? `≈ Binance ${fmtFixed(refPrice, pricePrecision(refPrice))}` : "Binance —"}</span>
+        <span className="muted small">
+          {refPrice !== null ? `≈ Binance ${fmtFixed(refPrice, pricePrecision(refPrice))}` : "Binance —"}
+          {spread !== null && ` · 价差 ${fmtNum((spread / bestAsk!) * 100, 2)}%`}
+        </span>
       </div>
 
       <div className="ob-side bids">

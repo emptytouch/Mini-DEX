@@ -630,6 +630,13 @@ h3 {
   flex: 0 0 auto;
 }
 
+.chip .dot {
+  background: var(--green);
+}
+.chip.feed .dot {
+  background: var(--muted);
+}
+
 .ob-side {
   flex: 1 1 0;
   min-height: 0;
