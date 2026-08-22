@@ -44,8 +44,10 @@ h3 {
 }
 
 /* ---------- 页面骨架 ---------- */
+/* 页面高度 = 视口高度：主区（.terminal）拿到确定的高度后，各面板内部自己滚动，
+   不会因为最近成交 / 订单簿条数变多把整个交易所撑高。视口太矮时主区保底 840px，整页滚动。 */
 .app {
-  min-height: 100vh;
+  height: 100vh;
   display: flex;
   flex-direction: column;
   background: var(--border);
@@ -56,9 +58,9 @@ h3 {
   flex: 1;
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr) 320px;
-  grid-template-rows: minmax(560px, 1fr) 280px;
+  grid-template-rows: minmax(0, 1fr) 280px;
   gap: 1px;
-  min-height: 0;
+  min-height: 840px;
 }
 
 .right-col {
@@ -80,6 +82,10 @@ h3 {
   .terminal {
     grid-template-columns: 1fr 1fr;
     grid-template-rows: 480px auto auto;
+    min-height: 0;
+  }
+  .trade-list {
+    max-height: 320px;
   }
   .chart-panel {
     grid-column: 1 / -1;
