@@ -45,6 +45,20 @@
 | [`server/`](./server) | Node 22 · TypeScript · Hono · viem · ws | 撮合引擎、内存账本、EIP-712 登录、链上事件监听、提现签名 |
 | [`web/`](./web) | Vite · React 18 · wagmi · viem · lightweight-charts | 仿现货交易所界面，K 线价格同步 Binance |
 
+> ### 🔧 本仓库在上游之上的改动
+>
+> 本仓库是课程仓库的 **fork**。本文（README）描述的是 **fork 之前** 的架构与用法，全部仍然有效；
+> **新增和修改的功能请看 [docs/FEATURES.md](./docs/FEATURES.md)** —— 撮合引擎的时间优先与自成交防护、
+> IOC / FOK、做市模块、WebSocket 私有 `orders` 频道、SQLite 持久化、提现链上硬上限，以及 3 个安全修复。
+> 下方「[已知简化](#已知简化课上会口头说明)」表中的 4 条里，2 条已完全解决、2 条解决了主要部分，逐条现状见 [FEATURES §六](./docs/FEATURES.md#六上游-readme已知简化表的现状)。
+>
+> | 文档 | 看它做什么 |
+> |---|---|
+> | [docs/FEATURES.md](./docs/FEATURES.md) | **功能完善说明**：改了哪些功能、改在哪、怎么验 |
+> | [docs/DELIVERABLES.md](./docs/DELIVERABLES.md) | 交付说明：合约地址、tx hash、余额对账 |
+> | [docs/RUNBOOK.md](./docs/RUNBOOK.md) | 操作手册：从零跑通的命令序列 + FAQ |
+> | [docs/SECURITY-REVIEW.md](./docs/SECURITY-REVIEW.md) | 安全审查报告：7 个问题，3 个已修复 |
+
 ## 🖥 界面预览
 
 ![Mini-DEX 交易界面](./docs/images/ui-overview.png)
@@ -158,7 +172,7 @@ mini-dex/
 ├── contracts/                 Foundry 项目
 │   ├── src/Vault.sol          托管合约：deposit / withdraw(EIP-712 授权)
 │   ├── src/MockERC20.sol      测试代币（公开 mint 水龙头）
-│   ├── test/Vault.t.sol       13 个合约测试
+│   ├── test/Vault.t.sol       22 个合约测试
 │   ├── script/Deploy.s.sol    部署脚本（打印可直接粘贴到 .env 的地址）
 │   └── abi/                   给 server / web 用的 ABI
 ├── server/                    Node + TypeScript 后端
@@ -419,7 +433,7 @@ cd web && npm run typecheck && npm run build
 | K 线右上角显示"轮询"而不是"实时" | 当前网络连不上 Binance WS（部分地区 `stream.binance.com` 返回 451） | 正常现象，已自动退化为 2 秒 REST 轮询；不影响交易 |
 | K 线显示"行情源不可用" | REST 和 WS 都连不上 Binance | 检查网络 / 代理；交易功能不受影响 |
 | Fuji 上 viem 估 gas 报 `exceeds block gas limit` | 公共 RPC 的 gas 估算不准 | 脚本里已显式传 `gas`；浏览器走 MetaMask 自己估算，不受影响 |
-| server 重启后挂单和成交不见了 | 后端是内存态 | 设计如此：只有充提余额会通过事件回放恢复（见下方"已知简化"） |
+| server 重启后挂单和成交不见了 | 没配 `DB_PATH`，后端退回了纯内存模式 | `server/.env` 里设 `DB_PATH`（默认 `server/data/state.sqlite`），余额 / 挂单 / 最近成交都会恢复 |
 | 订单簿是空的，市价单提示"簿上没有流动性" | 没人挂单 | `server/.env` 加 `MARKET_MAKER=1` 开启做市，或用第二个账户手动挂对手单 |
 | 日志出现 `[mm] 拉取 Binance 深度失败` | 当前网络连不上 Binance REST | 做市会自动重试，恢复后继续；不影响已有挂单和其他功能 |
 
@@ -432,12 +446,14 @@ cd web && npm run typecheck && npm run build
 
 ### 已知简化（课上会口头说明）
 
-| 简化点 | 生产做法 | 对应作业 |
+> ⚠️ 下表是 **fork 之前** 的状态。本仓库已经让其中 3 条不再成立，逐条现状见 [docs/FEATURES.md §六](./docs/FEATURES.md#六上游-readme已知简化表的现状)。
+
+| 简化点 | 生产做法 | 现状 |
 |---|---|---|
-| 账本内存态，重启靠事件回放恢复充提，成交 / 挂单丢失 | TimescaleDB / PostgreSQL 落库 | 进阶 B |
-| `Vault.withdraw` 不用链上 `balances` 做硬上限 | 链上记账 + 限额 | 进阶 A |
-| `/withdraw` 先扣余额再签名，不跟踪 in-flight | 记录 nonce 状态，监听 `Withdraw` 事件对账 | — |
-| 允许自成交（self-trade） | 撮合时拒绝同一账户对手盘 | 必做 1.3 |
+| 账本内存态，重启靠事件回放恢复充提，成交 / 挂单丢失 | TimescaleDB / PostgreSQL 落库 | ✅ **已解决** —— 落 SQLite（`server/src/store.ts`），挂单和成交也能恢复 |
+| `Vault.withdraw` 不用链上 `balances` 做硬上限 | 链上记账 + 限额 | ⚠️ **部分** —— 加了单笔限额 + 金库偿付能力两道硬上限；**有意不按 `balances` 逐用户封顶**（成交在链下，赚到的币在链上没有充值记录，封顶会让用户提不出来） |
+| `/withdraw` 先扣余额再签名，不跟踪 in-flight | 记录 nonce 状态，监听 `Withdraw` 事件对账 | ⚠️ **部分** —— `debited_nonces` 已按 nonce 跟踪「扣过账」，重启回放不会重复扣款；**超时未落链的自动退款仍未实现** |
+| 允许自成交（self-trade） | 撮合时拒绝同一账户对手盘 | ✅ **已解决** —— 默认开启自成交防护（`OrderBook` 构造参数） |
 
 ## 🎓 课程与作业
 
