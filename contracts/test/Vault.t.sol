@@ -24,6 +24,7 @@ contract VaultTest is Test {
     // 复制一份事件声明，给 vm.expectEmit 用
     event Deposit(address indexed user, address indexed token, uint256 amount);
     event Withdraw(address indexed user, address indexed token, uint256 amount, uint256 nonce);
+    event WithdrawLimitSet(address indexed token, uint256 limit);
 
     function setUp() public {
         vm.warp(1_700_000_000); // 给 block.timestamp 一个像样的值，方便算 deadline
@@ -185,12 +186,111 @@ contract VaultTest is Test {
         assertEq(vault.balances(alice, address(usdc)), 0); // 归零而不是 revert
     }
 
+    // ---------- 链上硬上限：金库偿付能力 ----------
+
+    /// @dev 后端签了 150，但金库里只有 alice 存的 100 -> 链上直接拦下，一分钱都出不去
+    function test_RevertWhen_Withdraw_ExceedsVaultLiquidity() public {
+        _depositAlice(100e6);
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _sign(SIGNER_PK, alice, address(usdc), 150e6, 1, deadline);
+
+        vm.prank(alice);
+        vm.expectRevert("Vault: insufficient vault liquidity");
+        vault.withdraw(address(usdc), 150e6, 1, deadline, sig);
+
+        assertEq(usdc.balanceOf(address(vault)), 100e6); // 金库没动
+        assertEq(usdc.balanceOf(alice), 900e6);
+        assertFalse(vault.usedNonces(1));                // nonce 没被消耗，可以重签再来
+    }
+
+    /// @dev 边界：刚好等于金库持币要能提出来
+    function test_Withdraw_ExactlyVaultLiquidity_Succeeds() public {
+        _depositAlice(100e6);
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _sign(SIGNER_PK, alice, address(usdc), 100e6, 1, deadline);
+
+        vm.prank(alice);
+        vault.withdraw(address(usdc), 100e6, 1, deadline, sig);
+
+        assertEq(usdc.balanceOf(alice), 1_000e6);
+        assertEq(usdc.balanceOf(address(vault)), 0);
+    }
+
+    // ---------- 链上硬上限：单笔提现限额 ----------
+
+    function test_Default_WithdrawLimitIsZero_MeaningUnlimited() public view {
+        assertEq(vault.withdrawLimit(address(usdc)), 0);
+    }
+
+    function test_RevertWhen_Withdraw_ExceedsTokenLimit() public {
+        _depositAlice(100e6);
+        vault.setWithdrawLimit(address(usdc), 50e6);
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _sign(SIGNER_PK, alice, address(usdc), 51e6, 1, deadline);
+
+        vm.prank(alice);
+        vm.expectRevert("Vault: exceeds token limit");
+        vault.withdraw(address(usdc), 51e6, 1, deadline, sig);
+    }
+
+    function test_Withdraw_AtTokenLimit_Succeeds() public {
+        _depositAlice(100e6);
+        vault.setWithdrawLimit(address(usdc), 50e6);
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _sign(SIGNER_PK, alice, address(usdc), 50e6, 1, deadline);
+
+        vm.prank(alice);
+        vault.withdraw(address(usdc), 50e6, 1, deadline, sig);
+
+        assertEq(usdc.balanceOf(alice), 950e6);
+    }
+
+    /// @dev 限额是「单笔」而不是「累计」：连提两笔各 50，都能过
+    function test_TokenLimit_IsPerWithdrawalNotCumulative() public {
+        _depositAlice(100e6);
+        vault.setWithdrawLimit(address(usdc), 50e6);
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig1 = _sign(SIGNER_PK, alice, address(usdc), 50e6, 1, deadline);
+        bytes memory sig2 = _sign(SIGNER_PK, alice, address(usdc), 50e6, 2, deadline);
+
+        vm.startPrank(alice);
+        vault.withdraw(address(usdc), 50e6, 1, deadline, sig1);
+        vault.withdraw(address(usdc), 50e6, 2, deadline, sig2);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(alice), 1_000e6);
+    }
+
+    /// @dev 限额按代币分别设置：USDC 限 50 不影响 WAVAX（默认不限）
+    function test_TokenLimit_IsPerToken() public {
+        vault.setWithdrawLimit(address(usdc), 50e6);
+        assertEq(vault.withdrawLimit(address(wavax)), 0);
+    }
+
     // ---------- admin ----------
 
     function test_RevertWhen_SetSigner_NotOwner() public {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
         vault.setSigner(alice);
+    }
+
+    function test_RevertWhen_SetWithdrawLimit_NotOwner() public {
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        vault.setWithdrawLimit(address(usdc), 1e6);
+    }
+
+    function test_SetWithdrawLimit_EmitsEvent() public {
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit WithdrawLimitSet(address(usdc), 50e6);
+        vault.setWithdrawLimit(address(usdc), 50e6);
+        assertEq(vault.withdrawLimit(address(usdc)), 50e6);
     }
 
     function test_SetSigner_RotatesKey() public {
