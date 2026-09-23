@@ -1,8 +1,9 @@
-// WebSocket 订阅：一条连接拿到订单簿 / 成交 / 余额三种推送。
-// 登录后发 {type:"auth", token}，服务端才会把余额推给这条连接。
+// WebSocket 订阅：一条连接拿到订单簿 / 成交（公共）和余额 / 挂单（私有）四种推送。
+// 登录后发 {type:"auth", token}，服务端才会把余额和挂单推给这条连接 —— 别人的连接收不到。
+// 服务端在认证通过时还会各补一份余额 + 挂单快照，所以断线重连后状态能自愈。
 // 断线按 1s → 2s → 4s … 最多 10s 的退避重连。
 import { useEffect, useState } from "react";
-import type { Balances, OrderBookSnapshot, Trade } from "./api";
+import type { Balances, Order, OrderBookSnapshot, Trade } from "./api";
 
 export const WS_URL: string = import.meta.env.VITE_WS_URL ?? "ws://localhost:8787/ws";
 
@@ -11,12 +12,14 @@ const MAX_TRADES = 30;
 type WsMessage =
   | { type: "orderbook"; data: OrderBookSnapshot }
   | { type: "trade"; data: Trade | Trade[] }
-  | { type: "balance"; address: string; data: Balances };
+  | { type: "balance"; address: string; data: Balances }
+  | { type: "orders"; address: string; data: Order[] };
 
 export function useMiniDexSocket(token?: string | null) {
   const [orderbook, setOrderbook] = useState<OrderBookSnapshot | null>(null);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [balances, setBalances] = useState<Balances | null>(null);
+  const [orders, setOrders] = useState<Order[] | null>(null);
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
@@ -25,8 +28,9 @@ export function useMiniDexSocket(token?: string | null) {
     let retries = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
-    // token 变了（登录/登出）就重新建连，余额先清空
+    // token 变了（登录/登出）就重新建连，私有的余额和挂单先清空
     setBalances(null);
+    setOrders(null);
 
     function connect() {
       ws = new WebSocket(WS_URL);
@@ -56,6 +60,9 @@ export function useMiniDexSocket(token?: string | null) {
           case "balance":
             setBalances(msg.data);
             break;
+          case "orders":
+            setOrders(msg.data);
+            break;
         }
       };
 
@@ -79,5 +86,5 @@ export function useMiniDexSocket(token?: string | null) {
     };
   }, [token]);
 
-  return { orderbook, trades, balances, connected };
+  return { orderbook, trades, balances, orders, connected };
 }

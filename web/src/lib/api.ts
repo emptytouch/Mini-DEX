@@ -6,6 +6,8 @@ export type Address = `0x${string}`;
 export type TokenSymbol = "USDC" | "WAVAX";
 export type Side = "buy" | "sell";
 export type OrderType = "limit" | "market";
+// 有效期：GTC 挂着等对手方 / IOC 吃多少算多少、剩余作废 / FOK 要么全成要么整单作废
+export type TimeInForce = "GTC" | "IOC" | "FOK";
 
 export interface Config {
   chainId: number;
@@ -42,6 +44,7 @@ export interface Order {
   owner: string;
   side: Side;
   type: OrderType;
+  tif: TimeInForce;
   price: string;
   qty: string;
   remaining: string;
@@ -64,6 +67,7 @@ export interface PlaceOrderBody {
   type: OrderType;
   price?: string;
   qty: string;
+  tif?: TimeInForce;
 }
 
 // POST /withdraw 返回的"提现授权"，原样交给 Vault.withdraw

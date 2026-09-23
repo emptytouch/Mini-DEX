@@ -15,3 +15,9 @@ contracts/broadcast/
 
 # 日志
 *.log
+
+# SQLite 落库文件（本地运行状态，不是代码；含真实余额和挂单）
+server/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

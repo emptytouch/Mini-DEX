@@ -3,12 +3,13 @@
 // buy limit 冻结 price*qty USDC；buy market 冻结全部可用 USDC；sell 冻结 qty WAVAX。
 import { Hono } from "hono";
 import { randomBytes, randomUUID } from "node:crypto";
-import { OrderBook, type Fill, type Order, type OrderType, type Side } from "./engine/orderbook.js";
+import { OrderBook, type Fill, type Order, type OrderType, type Side, type TimeInForce } from "./engine/orderbook.js";
 import { Ledger, type Asset, type Balances } from "./ledger.js";
 import { parseFixed, formatFixed, mulFixed } from "./fixed.js";
 import type { AuthEnv } from "./auth.js";
-import type { Chain } from "./chain.js";
+import type { Chain, ChainEvent } from "./chain.js";
 import type { WsHub } from "./ws.js";
+import type { Store, StoredTrade } from "./store.js";
 import type { MiddlewareHandler } from "hono";
 
 export interface Trade { id: string; price: string; qty: string; side: Side; ts: number }
@@ -18,6 +19,8 @@ export interface RoutesDeps {
   book: OrderBook;
   chain: Chain;
   ws: WsHub;
+  /** 不传就是纯内存模式（测试用）；传了则每次状态变更后落库 */
+  store?: Store;
   bearer: MiddlewareHandler<AuthEnv>;
   config: { chainId: number; wsUrl: string; vault: string; usdc: string; wavax: string; marketMaker?: { address: string; symbol: string; source: string } | null };
 }
@@ -36,7 +39,7 @@ export function createRoutes(d: RoutesDeps) {
     WAVAX: { available: formatFixed(b.WAVAX.available), locked: formatFixed(b.WAVAX.locked) },
   });
   const fmtOrder = (o: Order) => ({
-    id: o.id, owner: o.owner, side: o.side, type: o.type,
+    id: o.id, owner: o.owner, side: o.side, type: o.type, tif: o.tif,
     price: formatFixed(o.price), qty: formatFixed(o.qty), remaining: formatFixed(o.remaining), ts: o.ts,
   });
   const fmtFill = (f: Fill) => ({ ...f, price: formatFixed(f.price), qty: formatFixed(f.qty) });
@@ -47,6 +50,27 @@ export function createRoutes(d: RoutesDeps) {
   };
   const lockAsset = (side: Side): Asset => (side === "buy" ? "USDC" : "WAVAX");
   const pushBalance = (address: string) => ws.sendBalance(address, fmtBalances(ledger.get(address)));
+  /** 该地址当前还在簿上的挂单（格式和 GET /orders 一致），私有 orders 频道推的就是它 */
+  const ordersSnapshot = (address: string) => book.ordersOf(address).map(fmtOrder);
+  const pushOrders = (address: string) => ws.sendOrders(address, ordersSnapshot(address));
+
+  // ---------- 持久化 ----------
+  /** 把当前状态整体落库（余额 + 挂单 + 最近成交）。数据量小，全量重写最简单。
+   *  eventKey 有值时，"记过这笔链上事件"和余额写在同一个事务里 —— 回放重叠不会重复入账。 */
+  function persist(eventKey?: string) {
+    d.store?.save({ balances: ledger.entries(), orders: book.allOrders(), trades }, eventKey);
+  }
+
+  /** 启动时从库里恢复（必须在监听链上事件之前调，否则回放会和恢复的余额打架） */
+  function restore(state: { orders: Order[]; trades: StoredTrade[] }) {
+    book.restore(state.orders);
+    for (const o of state.orders) {
+      // 冻结额不用存，能算出来：买单价×剩余量，卖单就是剩余量（和 placeOrder 里的算法一致）
+      locks.set(o.id, o.side === "buy" ? mulFixed(o.price, o.remaining) : o.remaining);
+    }
+    trades.push(...state.trades.slice(-MAX_TRADES));
+    console.log(`[store] 恢复：挂单 ${state.orders.length} 张，最近成交 ${Math.min(state.trades.length, MAX_TRADES)} 条`);
+  }
 
   /** 一笔成交的结算：买方 locked USDC -> 卖方；卖方 locked WAVAX -> 买方 */
   function settle(f: Fill) {
@@ -93,7 +117,7 @@ export function createRoutes(d: RoutesDeps) {
   /** 下单：冻结 -> 撮合 -> 结算 -> 解冻 -> 广播。余额不足等直接抛 Error。 */
   function placeOrder(
     owner: string,
-    input: { side: Side; type: OrderType; price: bigint; qty: bigint },
+    input: { side: Side; type: OrderType; price: bigint; qty: bigint; tif?: TimeInForce },
     opts: { broadcastBook?: boolean } = {},
   ): { order: Order; fills: Fill[] } {
     const { side, type, price, qty } = input;
@@ -114,7 +138,7 @@ export function createRoutes(d: RoutesDeps) {
     }
 
     // 2. 撮合
-    const { fills, resting } = book.submit({ id, owner, side, type, price, qty });
+    const { fills, resting } = book.submit({ id, owner, side, type, price, qty, tif: input.tif });
 
     // 3. 结算每笔成交
     for (const f of fills) settle(f);
@@ -141,9 +165,19 @@ export function createRoutes(d: RoutesDeps) {
     // 6. 广播（做市模块一轮会挂很多单，它自己在最后广播一次）
     if (opts.broadcastBook !== false) broadcastBook();
     pushBalance(owner);
-    for (const maker of new Set(fills.map((f) => f.maker))) if (maker !== owner) pushBalance(maker);
+    pushOrders(owner);
+    for (const maker of new Set(fills.map((f) => f.maker))) {
+      if (maker === owner) continue;
+      // maker 的挂单可能被吃掉了（或被吃掉一部分），余额和挂单都要推给它
+      pushBalance(maker);
+      pushOrders(maker);
+    }
 
-    const order: Order = resting ?? { id, owner, side, type, price, qty, remaining: qty - fills.reduce((s, f) => s + f.qty, 0n), ts: fills[0]?.ts ?? Date.now(), seq: 0 };
+    const order: Order = resting ?? {
+      id, owner, side, type, tif: input.tif ?? (type === "market" ? "IOC" : "GTC"),
+      price, qty, remaining: qty - fills.reduce((s, f) => s + f.qty, 0n), ts: fills[0]?.ts ?? Date.now(), seq: 0,
+    };
+    persist();
     return { order, fills };
   }
 
@@ -154,6 +188,8 @@ export function createRoutes(d: RoutesDeps) {
     releaseLock(order.id, owner, order.side);
     if (opts.broadcastBook !== false) broadcastBook();
     pushBalance(owner);
+    pushOrders(owner);
+    persist();
     return order;
   }
 
@@ -181,10 +217,14 @@ export function createRoutes(d: RoutesDeps) {
 
   app.post("/orders", d.bearer, async (c) => {
     const owner = c.get("address");
-    const body = await c.req.json<{ side?: string; type?: string; price?: string; qty?: string }>().catch(() => ({}) as Record<string, string>);
+    const body = await c.req.json<{ side?: string; type?: string; price?: string; qty?: string; tif?: string }>().catch(() => ({}) as Record<string, string>);
     const { side, type } = body;
     if (side !== "buy" && side !== "sell") return c.json({ error: "side 必须是 buy / sell" }, 400);
     if (type !== "limit" && type !== "market") return c.json({ error: "type 必须是 limit / market" }, 400);
+    if (body.tif !== undefined && body.tif !== "GTC" && body.tif !== "IOC" && body.tif !== "FOK") {
+      return c.json({ error: "tif 必须是 GTC / IOC / FOK" }, 400);
+    }
+    const tif = body.tif as TimeInForce | undefined;
 
     let qty: bigint, price = 0n;
     try {
@@ -195,7 +235,7 @@ export function createRoutes(d: RoutesDeps) {
     if (type === "limit" && price <= 0n) return c.json({ error: "limit 单必须给 price" }, 400);
 
     try {
-      const { order, fills } = placeOrder(owner, { side, type, price, qty });
+      const { order, fills } = placeOrder(owner, { side, type, price, qty, tif });
       return c.json({ order: fmtOrder(order), fills: fills.map(fmtFill) });
     } catch (e) { return c.json({ error: (e as Error).message }, 400); }
   });
@@ -214,13 +254,26 @@ export function createRoutes(d: RoutesDeps) {
     const asset = body.token;
     if (asset !== "USDC" && asset !== "WAVAX") return c.json({ error: "token 必须是 USDC / WAVAX" }, 400);
     let amount: bigint;
-    try { amount = parseFixed(body.amount ?? ""); ledger.debit(owner, asset, amount); }
+    try { amount = parseFixed(body.amount ?? ""); }
     catch (e) { return c.json({ error: (e as Error).message }, 400); }
 
     const nonce = BigInt("0x" + randomBytes(8).toString("hex"));          // 随机 uint64
+
+    // 先查链上硬上限（单笔限额 / 金库偿付能力），通过了才扣链下余额。
+    // 顺序不能反：先扣再发现链上提不出来，用户的两头就都落空了。
+    try {
+      await chain.checkWithdrawable(asset, amount);
+      ledger.debit(owner, asset, amount);
+    } catch (e) { return c.json({ error: (e as Error).message }, 400); }
+
+    // 扣账成功才记 nonce：重启回放看到这条 Withdraw 事件时，靠它知道"已经扣过了"。
+    // 必须和上面的 debit 挨着，中间别插可能抛错的东西，否则会出现"扣了但没记"。
+    d.store?.markWithdrawn(nonce);
+
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 10 * 60);    // 10 分钟内有效
     const { token, amountWei, signature } = await chain.signWithdraw({ user: owner, asset, amount, nonce, deadline });
     pushBalance(owner);
+    persist();
     return c.json({
       token: asset, tokenAddress: token, amount: amountWei.toString(),
       nonce: nonce.toString(), deadline: deadline.toString(), signature, vault: d.config.vault,
@@ -234,21 +287,45 @@ export function createRoutes(d: RoutesDeps) {
       ledger.credit(owner, "USDC", parseFixed("10000"));
       ledger.credit(owner, "WAVAX", parseFixed("100"));
       pushBalance(owner);
+      persist();
       return c.json(fmtBalances(ledger.get(owner)));
     });
   }
 
-  /** 给 chain.ts 的充值回调用 */
-  function onDeposit(user: string, asset: Asset, amount: bigint) {
+  /** 给 chain.ts 的充值回调用。ev 有值时先查重：回放和实时监听可能覆盖同一笔充值。 */
+  function onDeposit(user: string, asset: Asset, amount: bigint, ev?: ChainEvent) {
+    if (ev && d.store?.hasEvent(ev.key)) return; // 这笔已经记过账了
     ledger.credit(user, asset, amount);
     pushBalance(user.toLowerCase());
+    persist(ev?.key);
   }
 
-  /** 启动回放历史 Withdraw 事件时扣账（实时提现在 /withdraw 签名时已经扣过，不会走这里） */
-  function onWithdrawBackfill(user: string, asset: Asset, amount: bigint) {
-    try { ledger.debit(user, asset, amount); }
-    catch (e) { console.warn(`[ledger] 回放 Withdraw 扣账失败 ${user} ${asset} ${amount}: ${(e as Error).message}`); }
+  /** 启动回放历史 Withdraw 事件时扣账。 */
+  function onWithdrawBackfill(user: string, asset: Asset, amount: bigint, ev?: ChainEvent) {
+    if (ev && d.store?.hasEvent(ev.key)) return;
+
+    // 这笔提现如果是本站实时签发的，钱在 /withdraw 里已经扣过了 —— 这里只能补个"已处理"标记。
+    // 签发时拿不到 tx hash，所以 processed_events 认不出它，只能靠 nonce 认。
+    // 少了这一步，每次重启都会把用户的提现再扣一遍（实测漏了 40 USDC，见 DELIVERABLES §4.6）。
+    if (ev?.nonce !== undefined && d.store?.isWithdrawn(ev.nonce)) {
+      persist(ev.key);
+      return;
+    }
+
+    try {
+      ledger.debit(user, asset, amount);
+      persist(ev?.key);
+    } catch (e) {
+      // 扣账失败就别标记"已处理"，下次启动还能重试
+      console.warn(`[ledger] 回放 Withdraw 扣账失败 ${user} ${asset} ${amount}: ${(e as Error).message}`);
+    }
   }
 
-  return { app, onDeposit, onWithdrawBackfill, snapshot, placeOrder, cancelOrder, broadcastBook, ordersOf: (owner: string) => book.ordersOf(owner) };
+  return {
+    app, onDeposit, onWithdrawBackfill, snapshot, placeOrder, cancelOrder, broadcastBook, persist, restore,
+    ordersOf: (owner: string) => book.ordersOf(owner),
+    // 给 ws.ts 用：连接认证通过时补发的两个私有快照
+    balancesSnapshot: (address: string) => fmtBalances(ledger.get(address)),
+    ordersSnapshot,
+  };
 }

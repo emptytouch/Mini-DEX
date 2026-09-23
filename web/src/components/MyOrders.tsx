@@ -1,16 +1,18 @@
-// 我的挂单：GET /orders 列表 + 撤单按钮。每 3 秒轮询一次兜底（主要靠下单/撤单后主动刷新）。
+// 我的挂单：优先用私有 WS 频道推来的 orders（下单/成交/撤单时服务端主动推，无延迟）。
+// pushed 为 null 表示还没收到过推送（例如 WS 刚断），这时才退回 GET /orders 轮询兜底。
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../lib/api";
+import { api, type Order } from "../lib/api";
 import { errorMessage, fmtNum, fmtTime } from "../lib/format";
 
-export function MyOrders({ token }: { token: string | null }) {
+export function MyOrders({ token, pushed }: { token: string | null; pushed?: Order[] | null }) {
   const queryClient = useQueryClient();
+  const live = pushed ?? null;
 
   const orders = useQuery({
     queryKey: ["orders", token],
     queryFn: () => api.orders(token!),
     enabled: !!token,
-    refetchInterval: 3000,
+    refetchInterval: live ? false : 3000, // 有推送就不轮询了
   });
 
   const cancel = useMutation({
@@ -21,7 +23,7 @@ export function MyOrders({ token }: { token: string | null }) {
     },
   });
 
-  const list = orders.data ?? [];
+  const list = live ?? orders.data ?? [];
 
   return (
     <div className="card">

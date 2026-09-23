@@ -1,12 +1,18 @@
-// 下单表单：buy/sell、limit/market、价格、数量 → POST /orders，显示成交笔数。
+// 下单表单：buy/sell、limit/market、有效期(GTC/IOC/FOK)、价格、数量 → POST /orders，显示成交笔数。
 // 显示可用余额，25/50/75/100% 按可用余额快速填数量；价格为空时给出 Binance 参考价。
 // 没登录时整个表单禁用。
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, type Balances, type OrderType, type PlaceOrderBody, type Side } from "../lib/api";
+import { api, type Balances, type OrderType, type PlaceOrderBody, type Side, type TimeInForce } from "../lib/api";
 import { errorMessage, fmtFixed, fmtNum, pricePrecision } from "../lib/format";
 
 const PCTS = [25, 50, 75, 100];
+// market 单没有「挂着等」一说，服务端固定按 IOC 处理，所以只在限价单上给选
+const TIFS: { value: TimeInForce; label: string; hint: string }[] = [
+  { value: "GTC", label: "GTC", hint: "挂着等对手方（默认）" },
+  { value: "IOC", label: "IOC", hint: "吃多少算多少，剩余立即作废" },
+  { value: "FOK", label: "FOK", hint: "不能全额成交就整单作废" },
+];
 
 interface Props {
   token: string | null;
@@ -19,6 +25,7 @@ export function OrderForm({ token, pickedPrice, balances, refPrice }: Props) {
   const queryClient = useQueryClient();
   const [side, setSide] = useState<Side>("buy");
   const [type, setType] = useState<OrderType>("limit");
+  const [tif, setTif] = useState<TimeInForce>("GTC");
   const [price, setPrice] = useState("");
   const [qty, setQty] = useState("");
 
@@ -55,12 +62,27 @@ export function OrderForm({ token, pickedPrice, balances, refPrice }: Props) {
 
   function submit() {
     const body: PlaceOrderBody = { side, type, qty };
-    if (type === "limit") body.price = price;
+    if (type === "limit") {
+      body.price = price;
+      body.tif = tif; // market 单不发 tif，服务端默认按 IOC
+    }
     place.mutate(body);
   }
 
   const result = place.data;
   const cost = effPrice * Number(qty);
+
+  // 下单结果文案。同样"有剩余量"，GTC 是挂到簿上等，IOC/FOK 是直接作废，说法得分开。
+  const resting = result?.order;
+  const restMsg = (() => {
+    if (!resting || resting.type !== "limit" || Number(resting.remaining) <= 0) return null;
+    if (resting.tif === "GTC") return <>；剩余 {fmtNum(resting.remaining, 4)} 已挂单</>;
+    // IOC/FOK 一笔没成时下面已经有"整单作废"了，不重复说
+    if (result!.fills.length === 0) return null;
+    return <>；剩余 {fmtNum(resting.remaining, 4)} 按 {resting.tif} 作废，未挂单</>;
+  })();
+  const voided = !!resting && result!.fills.length === 0 && resting.type === "limit" && resting.tif !== "GTC";
+  const noLiquidity = !!resting && result!.fills.length === 0 && resting.type === "market";
 
   return (
     <div className="panel form-panel">
@@ -87,6 +109,19 @@ export function OrderForm({ token, pickedPrice, balances, refPrice }: Props) {
             可用 {side === "buy" ? `${fmtNum(availUsdc, 2)} USDC` : `${fmtNum(availWavax, 4)} WAVAX`}
           </span>
         </div>
+
+        {type === "limit" && (
+          <div className="row between">
+            <div className="seg small inline">
+              {TIFS.map((t) => (
+                <button key={t.value} className={`seg-btn ${tif === t.value ? "on" : ""}`} onClick={() => setTif(t.value)}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            <span className="muted small">{TIFS.find((t) => t.value === tif)!.hint}</span>
+          </div>
+        )}
 
         <label className="field">
           <span className="row between">
@@ -130,12 +165,10 @@ export function OrderForm({ token, pickedPrice, balances, refPrice }: Props) {
 
         {result && (
           <div className="msg ok">
-            成交 {result.fills.length} 笔
-            {result.fills.length > 0 && <>，均价 {fmtNum(avgPrice(result.fills), 4)}</>}
-            {Number(result.order.remaining) > 0 && result.order.type === "limit" && (
-              <>；剩余 {fmtNum(result.order.remaining, 4)} 已挂单</>
-            )}
-            {result.fills.length === 0 && result.order.type === "market" && <>（簿上没有流动性）</>}
+            {result.fills.length === 0 ? <>未成交</> : <>成交 {result.fills.length} 笔，均价 {fmtNum(avgPrice(result.fills), 4)}</>}
+            {restMsg}
+            {noLiquidity && <>（簿上没有流动性）</>}
+            {voided && <>（{resting!.tif} 没吃到能满足条件的流动性，整单作废）</>}
           </div>
         )}
         {place.error && <div className="msg err">{errorMessage(place.error)}</div>}

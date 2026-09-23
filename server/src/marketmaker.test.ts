@@ -30,7 +30,7 @@ describe("scaleDepth", () => {
 });
 
 function order(partial: Partial<Order> & { side: Order["side"]; price: bigint; remaining: bigint }): Order {
-  return { id: partial.id ?? `${partial.side}-${partial.price}`, owner: "mm", type: "limit", qty: partial.remaining, ts: 0, seq: 0, ...partial };
+  return { id: partial.id ?? `${partial.side}-${partial.price}`, owner: "mm", type: "limit", tif: "GTC", qty: partial.remaining, ts: 0, seq: 0, ...partial };
 }
 
 describe("planQuotes", () => {

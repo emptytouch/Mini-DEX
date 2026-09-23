@@ -1,5 +1,5 @@
 // 内存账本：每个地址两种资产（USDC / WAVAX），各有 available（可用）和 locked（下单冻结）。
-// 重启即丢，生产要落库（Primit 用 TimescaleDB）。
+// 本类只管算，落库交给 store.ts（index.ts 在每次变更后调 store.save）。
 // 教训来自 Primit：地址一律小写存取，否则同一个钱包大小写不同会变成"两个用户"。
 
 import { formatFixed as f } from "./fixed.js";
@@ -66,6 +66,21 @@ export class Ledger {
     if (src.locked < amount) throw new Error(`冻结不足: ${asset} locked ${f(src.locked)} < ${f(amount)}`);
     src.locked -= amount;
     this.get(to)[asset].available += amount;
+  }
+
+  /** 这个地址有没有建过账户（没建过 = 没交易过，用来判断"要不要给做市账户第一次注资"） */
+  has(address: string): boolean {
+    return this.accounts.has(norm(address));
+  }
+
+  /** 全部账户快照，给 store 落库用。返回的是内部对象引用，调用方只读别改。 */
+  entries(): [address: string, balances: Balances][] {
+    return [...this.accounts];
+  }
+
+  /** 从库里恢复：直接把账户塞回去（启动时用，别在运行中调） */
+  restore(address: string, balances: Balances): void {
+    this.accounts.set(norm(address), balances);
   }
 }
 

@@ -98,7 +98,7 @@ export default function App() {
           <OrderForm token={auth.token} pickedPrice={pickedPrice} balances={balances} refPrice={refPrice} />
         </div>
 
-        <BottomPanel config={config.data} token={auth.token} balances={balances} />
+        <BottomPanel config={config.data} token={auth.token} balances={balances} orders={ws.orders} />
       </main>
     </div>
   );

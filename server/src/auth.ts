@@ -9,6 +9,10 @@ import { randomBytes } from "node:crypto";
 import { norm } from "./ledger.js";
 
 const NONCE_TTL_MS = 5 * 60 * 1000;
+// nonce 表的内存边界。没有这两条时，任何人都能靠反复 GET /auth/nonce?address=<新地址>
+// 往 Map 里塞永远不会被回收的条目（只有"用同一个地址登录"才会删），把进程内存撑爆。
+const MAX_NONCES = 10_000;
+const SWEEP_INTERVAL_MS = 30_000; // 清理节流：不必每个请求都全表扫一遍
 
 // 和前端/smoke 脚本必须完全一致（spec §3.4）
 export const LOGIN_TYPES = {
@@ -24,17 +28,41 @@ export const loginDomain = (chainId: number) => ({ name: "MiniDex", version: "1"
 // Hono 上下文里放什么变量，这里声明类型
 export type AuthEnv = { Variables: { address: string } };
 
-export function createAuth(opts: { chainId: number; jwtSecret: string }) {
+export function createAuth(opts: { chainId: number; jwtSecret: string; maxNonces?: number }) {
   const secret = new TextEncoder().encode(opts.jwtSecret);
+  const maxNonces = opts.maxNonces ?? MAX_NONCES;
   const nonces = new Map<string, { nonce: string; expires: number }>(); // address -> nonce（单次使用）
+  let lastSweep = 0;
+
+  /** 回收已过期的 nonce。force=true 时忽略节流（表满时用）。 */
+  function sweep(now: number, force = false): void {
+    if (!force && now - lastSweep < SWEEP_INTERVAL_MS) return;
+    lastSweep = now;
+    for (const [k, v] of nonces) if (v.expires <= now) nonces.delete(k);
+  }
+
+  /** 表满且没有可回收的过期项时淘汰最老的（Map 保持插入顺序，首个 key 即最老）。 */
+  function evictOldest(): void {
+    while (nonces.size >= maxNonces) {
+      const oldest = nonces.keys().next();
+      if (oldest.done) break;
+      nonces.delete(oldest.value);
+    }
+  }
 
   const router = new Hono();
 
   router.get("/auth/nonce", (c) => {
     const address = c.req.query("address") ?? "";
     if (!isAddress(address)) return c.json({ error: "address 非法" }, 400);
+    const now = Date.now();
+    sweep(now);
+    if (nonces.size >= maxNonces) {
+      sweep(now, true); // 先强制回收一轮过期的，实在腾不出位置再淘汰最老的
+      evictOldest();
+    }
     const nonce = "0x" + randomBytes(16).toString("hex");
-    nonces.set(norm(address), { nonce, expires: Date.now() + NONCE_TTL_MS });
+    nonces.set(norm(address), { nonce, expires: now + NONCE_TTL_MS });
     return c.json({ nonce });
   });
 

@@ -1,6 +1,6 @@
 // 底部面板：当前委托 / 资产与充提 两个 Tab，像真实交易所把账户相关操作收在下方。
 import { useState } from "react";
-import type { Balances, Config } from "../lib/api";
+import type { Balances, Config, Order } from "../lib/api";
 import { MyOrders } from "./MyOrders";
 import { Wallet } from "./Wallet";
 
@@ -10,9 +10,10 @@ interface Props {
   config: Config | undefined;
   token: string | null;
   balances: Balances | null;
+  orders: Order[] | null;
 }
 
-export function BottomPanel({ config, token, balances }: Props) {
+export function BottomPanel({ config, token, balances, orders }: Props) {
   const [tab, setTab] = useState<Tab>("orders");
   return (
     <div className="panel bottom-panel">
@@ -25,7 +26,7 @@ export function BottomPanel({ config, token, balances }: Props) {
         </button>
       </div>
       <div className="bottom-body">
-        {tab === "orders" && <MyOrders token={token} />}
+        {tab === "orders" && <MyOrders token={token} pushed={orders} />}
         {tab === "assets" &&
           (config ? <Wallet config={config} token={token} balances={balances} /> : <p className="muted">加载配置中…</p>)}
       </div>

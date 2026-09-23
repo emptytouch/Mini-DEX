@@ -1,17 +1,18 @@
 # mini-dex server
 
-教学用链下撮合后端：撮合引擎 + 内存账本 + EIP-712 登录 + Vault 事件监听。**不落库，重启即丢。**
+教学用链下撮合后端：撮合引擎 + 账本 + EIP-712 登录 + Vault 事件监听。**状态落 SQLite，重启不丢。**
 
 ```
 src/engine/orderbook.ts   撮合引擎（价格-时间优先，成交价 = maker 价）
 src/engine/orderbook.test.ts
 src/fixed.ts              8 位小数定点数 <-> 十进制字符串
-src/ledger.ts             内存账本 available / locked
+src/ledger.ts             账本 available / locked（只算，不落库）
+src/store.ts              SQLite 持久化（余额 / 挂单 / 成交 / 链上事件游标）（+test）
 src/auth.ts               EIP-712 登录 -> JWT
 src/chain.ts              监听 Vault Deposit；签 Withdraw 授权
 src/marketmaker.ts        做市：把 Binance 盘口镜像到本所订单簿（+test）
 src/routes.ts             HTTP API（下单冻结 / 成交划转 / 撤单解冻）
-src/ws.ts                 WebSocket 广播
+src/ws.ts                 WebSocket 广播（公共 orderbook/trade + 私有 balance/orders）
 src/index.ts              入口
 scripts/smoke.ts          冒烟脚本
 ```
@@ -22,9 +23,22 @@ scripts/smoke.ts          冒烟脚本
 npm install
 cp .env.example .env
 npm run dev          # http://localhost:8787
-npm test             # 撮合引擎 / 账本 / 定点数 单元测试
+npm test             # 撮合引擎 / 账本 / 定点数 / 私有频道 / 持久化 单元测试
 npm run typecheck
 ```
+
+## 持久化
+
+默认落库到 `server/data/mini-dex.sqlite`（已 gitignore），用 Node 内置的 `node:sqlite`，无第三方依赖。
+存余额、挂单、最近成交，以及链上事件游标；启动时先恢复再回放链上事件。
+
+```bash
+DB_PATH=:memory: npm run dev   # 退回纯内存模式（重启即丢）
+rm -rf data && npm run dev     # 清库重来
+```
+
+两点值得注意：金额一律以十进制字符串存（8 位定点很容易越过 SQLite 的 64 位 INTEGER）；
+每笔链上事件按 `txHash:logIndex` 去重，且和余额写在同一个事务里，所以回放范围重叠不会重复入账。
 
 ## 三种运行模式（只改 `.env`）
 
@@ -71,7 +85,9 @@ cd ../contracts && forge script script/Deploy.s.sol --broadcast --rpc-url http:/
 - `GET /auth/nonce?address=` → `POST /auth/login {address, nonce, signature}` → `{token}`
 - `GET /me` `GET /balances` `GET /orders` `POST /orders` `DELETE /orders/:id` `POST /withdraw`（Bearer）
 - `GET /orderbook?depth=10` `GET /trades?limit=50` `GET /config`
-- `ws://localhost:8787/ws`：连上就收到 `orderbook` 快照；发 `{"type":"auth","token"}` 后才会收到自己的 `balance`。
+- `ws://localhost:8787/ws`：连上就收到 `orderbook` 快照（公共）；发 `{"type":"auth","token"}` 后
+  补发自己的 `balance` + `orders` 快照，此后这两类只推给本人的连接 —— 下单 / 被成交 / 撤单都会即时推送，
+  前端不用轮询。`trade` 仍是全员广播。
 
 ## 课上要讲的点
 - 成交价 = maker 价（挂单价），taker 出价只是上限/下限。
